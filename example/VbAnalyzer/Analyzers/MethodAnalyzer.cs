@@ -6,10 +6,14 @@ namespace VbAnalyzer.Analyzers;
 
 public static class MethodAnalyzer
 {
-    public static List<MethodEntry> Analyze(VisualBasicCompilation compilation, string formName, string projectRoot)
+    public static List<MethodEntry> Analyze(VisualBasicCompilation compilation, string formName, string projectRoot,
+        HashSet<string>? additionalTypes = null)
     {
         var results = new List<MethodEntry>();
         var relevantTypes = FindRelevantTypes(compilation, formName);
+        if (additionalTypes != null)
+            foreach (var t in additionalTypes)
+                relevantTypes.Add(t);
 
         foreach (var tree in compilation.SyntaxTrees)
         {

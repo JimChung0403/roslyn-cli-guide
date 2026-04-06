@@ -35,10 +35,12 @@ var (compilation, compilationErrors, missingTypes) = CompilationBuilder.Build(vb
 
 // ── Step 3: 分析 ──
 Console.Error.WriteLine($"[3/5] Analyzing form '{formName}'...");
-var methods = MethodAnalyzer.Analyze(compilation, formName, projectRoot);
+// ReferenceAnalyzer 先跑（iterative expansion 會發現所有 relevant types）
+var (references, discoveredTypes) = ReferenceAnalyzer.Analyze(compilation, formName, projectRoot);
+// 把發現的型別傳給 MethodAnalyzer，確保 helper class/module 的方法都被收錄
+var methods = MethodAnalyzer.Analyze(compilation, formName, projectRoot, discoveredTypes);
 var controls = ControlAnalyzer.Analyze(compilation, formName, projectRoot);
 var events = EventAnalyzer.Analyze(compilation, formName, projectRoot);
-var references = ReferenceAnalyzer.Analyze(compilation, formName, projectRoot);
 var files = FileAnalyzer.Analyze(compilation, formName, projectRoot);
 var layout = LayoutAnalyzer.Build(controls, formName);
 

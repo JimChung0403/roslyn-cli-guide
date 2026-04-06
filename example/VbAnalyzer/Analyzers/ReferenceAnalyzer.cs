@@ -13,7 +13,7 @@ public static class ReferenceAnalyzer
     /// 最多 MaxExpandRounds 輪，遇到 Framework/.NET 內建型別或不在 source 中的 symbol 就停止。
     /// 邏輯與 Python build_vb_form_index.py 的 collect_references + iterative expansion 對齊。
     /// </summary>
-    public static List<ReferenceEntry> Analyze(VisualBasicCompilation compilation, string formName, string projectRoot)
+    public static (List<ReferenceEntry> refs, HashSet<string> discoveredTypes) Analyze(VisualBasicCompilation compilation, string formName, string projectRoot)
     {
         var results = new List<ReferenceEntry>();
         var scannedTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -75,7 +75,7 @@ public static class ReferenceAnalyzer
                 Console.Error.WriteLine($"       Expansion round {round + 1}: discovered {typesToScan.Count} new types ({string.Join(", ", typesToScan.Take(5))})");
         }
 
-        return results.OrderBy(r => r.File).ThenBy(r => r.Line).ToList();
+        return (results.OrderBy(r => r.File).ThenBy(r => r.Line).ToList(), scannedTypes);
     }
 
     /// <summary>
