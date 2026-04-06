@@ -78,14 +78,17 @@ dotnet run --project ~/tools/VbAnalyzer/ -- \
 
 ### 產出檔案
 
+每個索引同時產出 `.json`（給下游腳本讀）和 `.md`（給 LLM agent 讀），格式與 Python `build_vb_form_index.py` 完全一致：
+
 ```
 output/
-├── methods.json        ← 方法定義、起訖行、參數
-├── controls.json       ← 控制項名稱、型別、宣告位置
-├── events.json         ← 事件 handler、掛載方式、位置
-├── references.json     ← 呼叫關係、控制項讀寫、跨檔解析
-├── files.json          ← 檔案關聯、partial class
-└── stats.json          ← 統計：解析成功率、缺失型別
+├── files.json + files.md              ← 檔案關聯、partial class
+├── controls.json + controls.md        ← 控制項名稱、型別、宣告位置、座標
+├── events.json + events.md            ← 事件 handler、掛載方式、位置
+├── methods.json + methods.md          ← 方法定義、起訖行、參數
+├── references.json + references.md    ← 呼叫關係、控制項讀寫、跨檔解析
+├── layout.json + layout.md            ← UI 容器層級、控制項 x/y/w/h 座標（React 重寫用）
+└── stats.json                         ← 統計：解析成功率、缺失型別
 ```
 
 ### 驗證

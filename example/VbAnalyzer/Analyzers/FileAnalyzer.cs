@@ -10,17 +10,14 @@ public static class FileAnalyzer
     {
         var results = new List<FileEntry>();
         var formFiles = new HashSet<string>();
-
+        // 找 Form 自身的檔案（main + designer + partial）
         foreach (var tree in compilation.SyntaxTrees)
         {
             var model = compilation.GetSemanticModel(tree);
-            var root = tree.GetRoot();
-
-            foreach (var classBlock in root.DescendantNodes().OfType<ClassBlockSyntax>())
+            foreach (var classBlock in tree.GetRoot().DescendantNodes().OfType<ClassBlockSyntax>())
             {
                 var symbol = model.GetDeclaredSymbol(classBlock);
-                if (symbol == null) continue;
-                if (string.Equals(symbol.Name, formName, StringComparison.OrdinalIgnoreCase))
+                if (symbol != null && string.Equals(symbol.Name, formName, StringComparison.OrdinalIgnoreCase))
                     formFiles.Add(tree.FilePath);
             }
         }
@@ -28,108 +25,115 @@ public static class FileAnalyzer
         foreach (var filePath in formFiles)
         {
             var relPath = RelPath(filePath, projectRoot);
-            var role = ClassifyRole(filePath, formName);
-            var reason = role switch
-            {
-                "main" => "Form main code file",
-                "designer" => "Designer-generated partial class",
-                _ => "Partial class file"
-            };
+            var isDesigner = filePath.EndsWith(".Designer.vb", StringComparison.OrdinalIgnoreCase);
+            var isMain = string.Equals(System.IO.Path.GetFileNameWithoutExtension(filePath), formName, StringComparison.OrdinalIgnoreCase);
 
-            results.Add(new FileEntry
-            {
-                Path = relPath,
-                Role = role,
-                Reason = reason
-            });
+            // 對齊 Python 的 role 名稱
+            var role = isDesigner ? "form-designer" : isMain ? "form-main" : "partial";
+            var reason = isDesigner ? "Form Designer 檔案" : isMain ? "Form 主檔案" : "Partial class 檔案";
+
+            results.Add(new FileEntry { Path = relPath, Role = role, Reason = reason });
         }
 
-        // 加入 Form 引用的其他檔案（helper、service 等）
+        // 收集 Form 引用的所有外部型別（方法呼叫、欄位型別、member access、Imports）
+        var referencedTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var tree in compilation.SyntaxTrees)
+        {
+            var model = compilation.GetSemanticModel(tree);
+            foreach (var classBlock in tree.GetRoot().DescendantNodes().OfType<ClassBlockSyntax>())
+            {
+                var cs = model.GetDeclaredSymbol(classBlock);
+                if (cs == null || !string.Equals(cs.Name, formName, StringComparison.OrdinalIgnoreCase)) continue;
+
+                // 方法呼叫的 ContainingType
+                foreach (var inv in classBlock.DescendantNodes().OfType<InvocationExpressionSyntax>())
+                {
+                    if (model.GetSymbolInfo(inv).Symbol is IMethodSymbol m && m.ContainingType?.Name != null)
+                        referencedTypes.Add(m.ContainingType.Name);
+                }
+
+                // 欄位型別
+                foreach (var field in classBlock.DescendantNodes().OfType<FieldDeclarationSyntax>())
+                    foreach (var decl in field.Declarators)
+                        if (decl.AsClause is SimpleAsClauseSyntax ac)
+                        {
+                            var tn = model.GetTypeInfo(ac.Type).Type?.Name;
+                            if (tn != null) referencedTypes.Add(tn);
+                        }
+
+                // MemberAccess（如 CNPJEmpresa、modFuncoes.xxx）
+                foreach (var ma in classBlock.DescendantNodes().OfType<MemberAccessExpressionSyntax>())
+                {
+                    var sym = model.GetSymbolInfo(ma).Symbol;
+                    if (sym?.ContainingType?.Name != null && !IsExcludedType(sym.ContainingType))
+                        referencedTypes.Add(sym.ContainingType.Name);
+                }
+
+                // IdentifierName（如直接引用 Module 成員 CNPJEmpresa）
+                foreach (var id in classBlock.DescendantNodes().OfType<IdentifierNameSyntax>())
+                {
+                    var sym = model.GetSymbolInfo(id).Symbol;
+                    if (sym?.ContainingType?.Name != null
+                        && !string.Equals(sym.ContainingType.Name, formName, StringComparison.OrdinalIgnoreCase)
+                        && !IsExcludedType(sym.ContainingType))
+                        referencedTypes.Add(sym.ContainingType.Name);
+                }
+            }
+        }
+
+        // 找出包含被引用型別的檔案
         foreach (var tree in compilation.SyntaxTrees)
         {
             if (formFiles.Contains(tree.FilePath)) continue;
-
             var model = compilation.GetSemanticModel(tree);
             var root = tree.GetRoot();
-            var hasRelevantClass = false;
 
-            foreach (var classBlock in root.DescendantNodes().OfType<ClassBlockSyntax>())
+            var hasRelevant = root.DescendantNodes().OfType<ClassBlockSyntax>()
+                .Any(c => { var s = model.GetDeclaredSymbol(c); return s != null && referencedTypes.Contains(s.Name); })
+                || root.DescendantNodes().OfType<ModuleBlockSyntax>()
+                .Any(m => { var s = model.GetDeclaredSymbol(m); return s != null && referencedTypes.Contains(s.Name); });
+
+            if (hasRelevant)
             {
-                var symbol = model.GetDeclaredSymbol(classBlock);
-                if (symbol == null) continue;
-
-                // 檢查 Form 是否有引用這個 class
-                if (IsReferencedByForm(compilation, formName, symbol.Name))
+                var relPath = RelPath(tree.FilePath, projectRoot);
+                // 找出這個檔案裡被引用的 symbol 名稱
+                var symbolNames = new List<string>();
+                foreach (var c in root.DescendantNodes().OfType<ClassBlockSyntax>())
                 {
-                    hasRelevantClass = true;
-                    break;
+                    var s = model.GetDeclaredSymbol(c);
+                    if (s != null && referencedTypes.Contains(s.Name)) symbolNames.Add(s.Name);
                 }
-            }
-
-            foreach (var moduleBlock in root.DescendantNodes().OfType<ModuleBlockSyntax>())
-            {
-                var symbol = model.GetDeclaredSymbol(moduleBlock);
-                if (symbol == null) continue;
-                if (IsReferencedByForm(compilation, formName, symbol.Name))
+                foreach (var m in root.DescendantNodes().OfType<ModuleBlockSyntax>())
                 {
-                    hasRelevantClass = true;
-                    break;
+                    var s = model.GetDeclaredSymbol(m);
+                    if (s != null && referencedTypes.Contains(s.Name)) symbolNames.Add(s.Name);
                 }
-            }
 
-            if (hasRelevantClass)
-            {
                 results.Add(new FileEntry
                 {
-                    Path = RelPath(tree.FilePath, projectRoot),
-                    Role = "resolved-dependency",
-                    Reason = "referenced by Form methods"
+                    Path = relPath,
+                    Role = "related-helper",
+                    Reason = $"檔名含相關 symbol `{string.Join("`, `", symbolNames)}`"
                 });
             }
         }
 
-        return results.OrderBy(f => f.Role switch
-        {
-            "main" => 0, "designer" => 1, "partial" => 2, _ => 3
-        }).ToList();
+        // 排序對齊 Python：form-main → form-designer → partial → related-helper
+        return results
+            .OrderBy(f => f.Role switch { "form-main" => 0, "form-designer" => 1, "partial" => 2, "related-helper" => 3, _ => 4 })
+            .ThenBy(f => f.Path)
+            .ToList();
     }
 
-    static bool IsReferencedByForm(VisualBasicCompilation compilation, string formName, string typeName)
+    static bool IsExcludedType(INamedTypeSymbol type)
     {
-        foreach (var tree in compilation.SyntaxTrees)
-        {
-            var model = compilation.GetSemanticModel(tree);
-            var root = tree.GetRoot();
-
-            foreach (var classBlock in root.DescendantNodes().OfType<ClassBlockSyntax>())
-            {
-                var classSymbol = model.GetDeclaredSymbol(classBlock);
-                if (classSymbol == null) continue;
-                if (!string.Equals(classSymbol.Name, formName, StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                foreach (var invocation in classBlock.DescendantNodes().OfType<InvocationExpressionSyntax>())
-                {
-                    var symbolInfo = model.GetSymbolInfo(invocation);
-                    if (symbolInfo.Symbol is IMethodSymbol method
-                        && string.Equals(method.ContainingType?.Name, typeName, StringComparison.OrdinalIgnoreCase))
-                        return true;
-                }
-            }
-        }
+        var name = type.Name;
+        var ns = type.ContainingNamespace?.ToDisplayString() ?? "";
+        if (name is "Resources" or "MySettings" or "MyProject") return true;
+        if (ns.Contains("My.Resources") || ns.Contains("My.")) return true;
+        if (ns.StartsWith("System.") || ns == "System" || ns.StartsWith("Microsoft.")) return true;
         return false;
-    }
-
-    static string ClassifyRole(string filePath, string formName)
-    {
-        if (filePath.EndsWith(".Designer.vb", StringComparison.OrdinalIgnoreCase))
-            return "designer";
-
-        var fileName = System.IO.Path.GetFileNameWithoutExtension(filePath);
-        if (string.Equals(fileName, formName, StringComparison.OrdinalIgnoreCase))
-            return "main";
-
-        return "partial";
     }
 
     static string RelPath(string fullPath, string root)

@@ -4,13 +4,6 @@ namespace VbAnalyzer;
 
 public static class SolutionLoader
 {
-    /// <summary>
-    /// 從 .sln 或 .vbproj 收集所有 .vb 檔案路徑。
-    /// 用純文字解析，不依賴 MSBuild（因為 .NET Framework 專案在 Linux 上無法 MSBuild）。
-    /// </summary>
-    /// <summary>
-    /// Returns (vbFiles, firstVbprojPath) — the first .vbproj is used to read global imports.
-    /// </summary>
     public static (List<string> vbFiles, string? vbprojPath) CollectVbFiles(string? slnPath, string? vbprojPath)
     {
         var projectDirs = new List<string>();
@@ -26,7 +19,6 @@ public static class SolutionLoader
             }
 
             var slnDir = Path.GetDirectoryName(slnFullPath)!;
-
             var projPattern = new Regex(@"""([^""]+\.vbproj)""", RegexOptions.IgnoreCase);
 
             foreach (var line in File.ReadLines(slnFullPath))
@@ -40,8 +32,7 @@ public static class SolutionLoader
                     if (File.Exists(projFullPath))
                     {
                         firstVbproj ??= projFullPath;
-                        var projDir = Path.GetDirectoryName(projFullPath)!;
-                        projectDirs.Add(projDir);
+                        projectDirs.Add(Path.GetDirectoryName(projFullPath)!);
                         Console.Error.WriteLine($"       Project: {projRelPath}");
                     }
                     else
@@ -69,7 +60,6 @@ public static class SolutionLoader
             return ([], null);
         }
 
-        // 遞迴收集所有 .vb 檔，排除 obj/ 和 bin/
         var excludeDirs = new[] { "/obj/", "/bin/", "\\obj\\", "\\bin\\" };
 
         var files = projectDirs

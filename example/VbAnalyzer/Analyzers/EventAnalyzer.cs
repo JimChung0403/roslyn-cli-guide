@@ -30,29 +30,25 @@ public static class EventAnalyzer
         return results.OrderBy(e => e.Control).ThenBy(e => e.EventType).ToList();
     }
 
-    static void AnalyzeHandlesClauses(ClassBlockSyntax classBlock, SyntaxTree tree,
-        string projectRoot, List<EventEntry> results)
+    static void AnalyzeHandlesClauses(ClassBlockSyntax classBlock, SyntaxTree tree, string projectRoot, List<EventEntry> results)
     {
         foreach (var methodBlock in classBlock.DescendantNodes().OfType<MethodBlockSyntax>())
         {
             var methodStmt = methodBlock.SubOrFunctionStatement;
-            var handlesClause = methodStmt.HandlesClause;
-            if (handlesClause == null) continue;
+            if (methodStmt.HandlesClause == null) continue;
 
             var handlerName = methodStmt.Identifier.Text;
             var handlerLine = methodBlock.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
             var defStr = $"{RelPath(tree.FilePath, projectRoot)}:{handlerLine}";
 
-            foreach (var eventItem in handlesClause.Events)
+            foreach (var eventItem in methodStmt.HandlesClause.Events)
             {
                 var controlName = eventItem.EventContainer?.ToString() ?? "Unknown";
                 var eventName = eventItem.EventMember.Identifier.Text;
-
                 if (controlName.StartsWith("Me.", StringComparison.OrdinalIgnoreCase))
                     controlName = controlName[3..];
 
-                var wireupLine = handlesClause.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
-                var wireupStr = $"{RelPath(tree.FilePath, projectRoot)}:{wireupLine}";
+                var wireupLine = methodStmt.HandlesClause.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
 
                 results.Add(new EventEntry
                 {
@@ -60,14 +56,13 @@ public static class EventAnalyzer
                     Control = controlName,
                     EventType = eventName,
                     Definition = defStr,
-                    Wireups = [wireupStr]
+                    Wireups = [$"{RelPath(tree.FilePath, projectRoot)}:{wireupLine}"]
                 });
             }
         }
     }
 
-    static void AnalyzeAddHandlers(ClassBlockSyntax classBlock, SyntaxTree tree,
-        string projectRoot, List<EventEntry> results)
+    static void AnalyzeAddHandlers(ClassBlockSyntax classBlock, SyntaxTree tree, string projectRoot, List<EventEntry> results)
     {
         foreach (var addHandler in classBlock.DescendantNodes().OfType<AddRemoveHandlerStatementSyntax>())
         {
@@ -93,11 +88,8 @@ public static class EventAnalyzer
 
             results.Add(new EventEntry
             {
-                Handler = handlerName,
-                Control = controlName,
-                EventType = eventName,
-                Definition = wireupStr,
-                Wireups = [wireupStr]
+                Handler = handlerName, Control = controlName, EventType = eventName,
+                Definition = wireupStr, Wireups = [wireupStr]
             });
         }
     }

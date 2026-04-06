@@ -10,7 +10,7 @@ namespace VbAnalyzer;
 public record FileEntry
 {
     public string Path { get; init; } = "";
-    public string Role { get; init; } = "";      // "main", "designer", "partial", "helper", "resolved-dependency"
+    public string Role { get; init; } = "";
     public string Reason { get; init; } = "";
 }
 
@@ -19,8 +19,8 @@ public record ControlEntry
 {
     public string Name { get; init; } = "";
     public string ControlType { get; init; } = "";
-    public string Declaration { get; init; } = "";       // "file:line" 格式
-    public string? Initialization { get; init; }          // "file:line" 格式
+    public string Declaration { get; init; } = "";
+    public string? Initialization { get; init; }
     public string? Parent { get; init; }
     public List<string> DefaultProperties { get; init; } = [];
     public string? DisplayText { get; init; }
@@ -40,8 +40,8 @@ public record EventEntry
     public string Handler { get; init; } = "";
     public string Control { get; init; } = "";
     public string EventType { get; init; } = "";
-    public string Definition { get; init; } = "";         // "file:line" 格式
-    public List<string> Wireups { get; init; } = [];      // ["file:line", ...] 格式
+    public string Definition { get; init; } = "";
+    public List<string> Wireups { get; init; } = [];
 }
 
 // 對應 Python MethodEntry
@@ -52,7 +52,7 @@ public record MethodEntry
     public string File { get; init; } = "";
     public int StartLine { get; init; }
     public int EndLine { get; init; }
-    public string Signature { get; init; } = "";          // "Sub btnSave_Click(sender As Object, e As EventArgs)"
+    public string Signature { get; init; } = "";
     public List<string> Callers { get; init; } = [];
 }
 
@@ -64,19 +64,41 @@ public record ReferenceEntry
     public string File { get; init; } = "";
     public int Line { get; init; }
     public string RefType { get; init; } = "";
-    public string Context { get; init; } = "";            // 呼叫所在的程式碼片段
-    public string? ResolvedTo { get; init; }              // "file:line" 格式，null = unresolved
+    public string Context { get; init; } = "";
+    public string? ResolvedTo { get; init; }
 }
 
-// JSON 外層包裝（對應 Python 的 { "_purpose", "_consumers", "data" }）
-public record JsonWrapper<T>
+// layout.json 的結構
+public record LayoutData
 {
-    public string Purpose { get; init; } = "";
-    public string Consumers { get; init; } = "";
-    public List<T> Data { get; init; } = [];
+    public string Form { get; init; } = "";
+    public List<ContainerData> Containers { get; init; } = [];
 }
 
-// stats.json（Roslyn 獨有，Python 沒有）
+public record ContainerData
+{
+    public string Container { get; init; } = "";
+    public List<RowData> Rows { get; init; } = [];
+}
+
+public record RowData
+{
+    public int Y { get; init; }
+    public List<LayoutControl> Controls { get; init; } = [];
+}
+
+public record LayoutControl
+{
+    public string Name { get; init; } = "";
+    public string Text { get; init; } = "";
+    public string Type { get; init; } = "";
+    public int? X { get; init; }
+    public int? Y { get; init; }
+    public int? W { get; init; }
+    public int? H { get; init; }
+}
+
+// stats.json
 public record AnalysisStats
 {
     public int TotalFiles { get; init; }
