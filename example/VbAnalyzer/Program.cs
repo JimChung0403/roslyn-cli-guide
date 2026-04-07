@@ -4,6 +4,7 @@ using VbAnalyzer.Analyzers;
 
 string? slnPath = null, projectPath = null, formName = null, outputDir = null;
 string libsDir = "libs/";
+bool debugMode = false;
 
 for (int i = 0; i < args.Length; i++)
     switch (args[i])
@@ -13,6 +14,7 @@ for (int i = 0; i < args.Length; i++)
         case "--form": formName = args[++i]; break;
         case "--output": outputDir = args[++i]; break;
         case "--libs": libsDir = args[++i]; break;
+        case "--debug": debugMode = true; break;
         case "--help": PrintUsage(); return 0;
     }
 
@@ -100,106 +102,138 @@ OutputWriter.WriteJson(Path.Combine(outputDir, "stats.json"), stats, jsonOpt);
 
 Console.Error.WriteLine($"[5/5] Done. Analyzed: {stats.AnalyzedRate}% ({analyzedCount}/{references.Count}), Resolved to source: {stats.ResolvedRate}%");
 
-// ── Diagnostic log ──
-var diagPath = Path.Combine(outputDir, "diagnostic.log");
-using (var log = new StreamWriter(diagPath, false, System.Text.Encoding.UTF8))
+// ── Diagnostic log（--debug 模式才產生） ──
+if (debugMode)
 {
-    log.WriteLine($"=== VbAnalyzer Diagnostic Log ===");
-    log.WriteLine($"Form: {formName}");
-    log.WriteLine($"Time: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
-    log.WriteLine();
-
-    // 1. Project 資訊
-    log.WriteLine($"--- Projects ({projects.Count}) ---");
-    foreach (var p in projects)
+    var diagPath = Path.Combine(outputDir, "diagnostic.log");
+    using (var log = new StreamWriter(diagPath, false, System.Text.Encoding.UTF8))
     {
-        var (ns, imports) = CompilationBuilder.ParseVbproj(p.VbprojPath);
-        log.WriteLine($"  {p.ProjectName}: {p.VbFiles.Count} files, RootNamespace='{ns}', Imports={imports.Count}");
+        log.WriteLine($"=== VbAnalyzer Diagnostic Log (DEBUG MODE) ===");
+        log.WriteLine($"Form: {formName}");
+        log.WriteLine($"Time: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+        log.WriteLine();
+
+        // 1. Project 資訊
+        log.WriteLine($"--- Projects ({projects.Count}) ---");
+        foreach (var p in projects)
+        {
+            var (ns, imports) = CompilationBuilder.ParseVbproj(p.VbprojPath);
+            log.WriteLine($"  {p.ProjectName}: {p.VbFiles.Count} files, RootNamespace='{ns}', Imports={imports.Count}");
+        }
+        log.WriteLine();
+
+        // 2. Compilation 品質
+        log.WriteLine($"--- Compilation ---");
+        log.WriteLine($"  Total .vb files: {totalFiles}");
+        log.WriteLine($"  Compilation errors: {compilationErrors}");
+        log.WriteLine($"  Missing types: {missingTypes.Count}");
+        log.WriteLine();
+
+        // 3. Reference 分類
+        log.WriteLine($"--- References ({references.Count}) ---");
+        log.WriteLine($"  analyzed_rate: {stats.AnalyzedRate}% ({analyzedCount}/{references.Count})");
+        log.WriteLine($"  resolved_rate: {stats.ResolvedRate}% ({resolvedCount}/{references.Count})");
+        log.WriteLine();
+        log.WriteLine($"  ref_type distribution:");
+        foreach (var kv in refTypeDist.OrderByDescending(kv => kv.Value))
+            log.WriteLine($"    {kv.Key}: {kv.Value}");
+        log.WriteLine();
+
+        // 4. resolved_to 分類
+        var resolvedToSource = references.Where(r => r.ResolvedTo != null && !r.ResolvedTo.StartsWith("Framework:")).ToList();
+        var resolvedToFramework = references.Where(r => r.ResolvedTo != null && r.ResolvedTo.StartsWith("Framework:")).ToList();
+        var resolvedToNull = references.Where(r => r.ResolvedTo == null && r.RefType != "unresolved").ToList();
+        var unresolvedRefs = references.Where(r => r.RefType == "unresolved").ToList();
+
+        log.WriteLine($"  resolved_to breakdown:");
+        log.WriteLine($"    Source code (file:line):  {resolvedToSource.Count}");
+        log.WriteLine($"    Framework (.NET native):  {resolvedToFramework.Count}");
+        log.WriteLine($"    Third-party DLL (null):   {resolvedToNull.Count}");
+        log.WriteLine($"    Unresolved (null):        {unresolvedRefs.Count}");
+        log.WriteLine();
+
+        // 5. 每一筆 NOT resolved 的原因（核心 debug 資訊）
+        log.WriteLine($"========================================");
+        log.WriteLine($"  NOT RESOLVED — 逐筆原因分析");
+        log.WriteLine($"========================================");
+        log.WriteLine();
+
+        // 5a. Third-party DLL（Roslyn 解析成功但不是 .NET 原生 → resolved_to = null）
+        log.WriteLine($"--- [NOT RESOLVED] Third-party DLL — Roslyn 知道型別，但不是 .NET 原生 ({resolvedToNull.Count}) ---");
+        log.WriteLine($"    原因：這些 reference 的 target 定義在第三方 DLL（如 DevExpress），不在 .NET Framework 裡");
+        log.WriteLine($"    影響：ref_type 正確（control-read/write 等），但 resolved_to = null");
+        log.WriteLine();
+        foreach (var g in resolvedToNull.GroupBy(r => r.RefType).OrderByDescending(g => g.Count()))
+        {
+            log.WriteLine($"  ref_type={g.Key}: {g.Count()} 筆");
+            foreach (var r in g.Take(5))
+                log.WriteLine($"    target={r.Target}, caller={r.Caller}, file={r.File}:{r.Line}");
+            if (g.Count() > 5)
+                log.WriteLine($"    ... and {g.Count() - 5} more");
+            log.WriteLine();
+        }
+
+        // 5b. Unresolved（Roslyn 完全解不了 → ref_type = "unresolved"）
+        log.WriteLine($"--- [NOT RESOLVED] Unresolved — Roslyn 無法辨識型別 ({unresolvedRefs.Count}) ---");
+        log.WriteLine($"    原因：缺少 DLL、namespace 不對、或原始碼有語法錯誤");
+        log.WriteLine($"    影響：ref_type = unresolved，resolved_to = null");
+        log.WriteLine();
+        foreach (var g in unresolvedRefs.GroupBy(r => r.Target).OrderByDescending(g => g.Count()))
+        {
+            log.WriteLine($"  target={g.Key} ({g.Count()} 筆)");
+            foreach (var r in g.Take(3))
+                log.WriteLine($"    caller={r.Caller}, file={r.File}:{r.Line}, context={r.Context[..Math.Min(80, r.Context.Length)]}");
+            if (g.Count() > 3)
+                log.WriteLine($"    ... and {g.Count() - 3} more");
+            log.WriteLine();
+        }
+
+        // 6. 每一筆 RESOLVED 的明細
+        log.WriteLine($"========================================");
+        log.WriteLine($"  RESOLVED — 逐筆明細");
+        log.WriteLine($"========================================");
+        log.WriteLine();
+
+        // 6a. Source code
+        log.WriteLine($"--- [RESOLVED] Source code — 有原始碼位置 ({resolvedToSource.Count}) ---");
+        foreach (var r in resolvedToSource)
+            log.WriteLine($"  {r.Caller} → {r.Target} | {r.RefType} | resolved_to={r.ResolvedTo}");
+        log.WriteLine();
+
+        // 6b. Framework
+        log.WriteLine($"--- [RESOLVED] Framework — .NET 原生方法 ({resolvedToFramework.Count}) ---");
+        var fwGrouped = resolvedToFramework.GroupBy(r => r.ResolvedTo).OrderByDescending(g => g.Count());
+        foreach (var g in fwGrouped)
+        {
+            log.WriteLine($"  {g.Key} ({g.Count()} 筆)");
+            foreach (var r in g.Take(2))
+                log.WriteLine($"    caller={r.Caller}, target={r.Target}");
+            if (g.Count() > 2)
+                log.WriteLine($"    ... and {g.Count() - 2} more");
+        }
+        log.WriteLine();
+
+        // 7. Missing types 完整清單
+        log.WriteLine($"--- Missing types ({missingTypes.Count}) ---");
+        foreach (var t in missingTypes)
+            log.WriteLine($"  {t}");
+        log.WriteLine();
+
+        // 8. Methods 按 owner 分佈
+        log.WriteLine($"--- Methods ({methods.Count}) by owner ---");
+        var methodsByOwner = methods.GroupBy(m => m.Owner).OrderByDescending(g => g.Count());
+        foreach (var g in methodsByOwner)
+            log.WriteLine($"  {g.Key}: {g.Count()} methods");
+        log.WriteLine();
+
+        // 9. Files 清單
+        log.WriteLine($"--- Files ({files.Count}) ---");
+        foreach (var f in files)
+            log.WriteLine($"  [{f.Role}] {f.Path} — {f.Reason}");
     }
-    log.WriteLine();
 
-    // 2. Compilation 品質
-    log.WriteLine($"--- Compilation ---");
-    log.WriteLine($"  Total .vb files: {totalFiles}");
-    log.WriteLine($"  Compilation errors: {compilationErrors}");
-    log.WriteLine($"  Missing types: {missingTypes.Count}");
-    log.WriteLine();
-
-    // 3. Reference 分類
-    log.WriteLine($"--- References ({references.Count}) ---");
-    log.WriteLine($"  analyzed_rate: {stats.AnalyzedRate}% ({analyzedCount}/{references.Count})");
-    log.WriteLine($"  resolved_rate: {stats.ResolvedRate}% ({resolvedCount}/{references.Count})");
-    log.WriteLine();
-    log.WriteLine($"  ref_type distribution:");
-    foreach (var kv in refTypeDist.OrderByDescending(kv => kv.Value))
-        log.WriteLine($"    {kv.Key}: {kv.Value}");
-    log.WriteLine();
-
-    // 4. resolved_to 分類
-    var resolvedToSource = references.Where(r => r.ResolvedTo != null && !r.ResolvedTo.StartsWith("Framework:")).ToList();
-    var resolvedToFramework = references.Where(r => r.ResolvedTo != null && r.ResolvedTo.StartsWith("Framework:")).ToList();
-    var resolvedToNull = references.Where(r => r.ResolvedTo == null && r.RefType != "unresolved").ToList();
-    var unresolvedRefs = references.Where(r => r.RefType == "unresolved").ToList();
-
-    log.WriteLine($"  resolved_to breakdown:");
-    log.WriteLine($"    Source code (file:line):  {resolvedToSource.Count}");
-    log.WriteLine($"    Framework (.NET native):  {resolvedToFramework.Count}");
-    log.WriteLine($"    Third-party DLL (null):   {resolvedToNull.Count}");
-    log.WriteLine($"    Unresolved (null):        {unresolvedRefs.Count}");
-    log.WriteLine();
-
-    // 5. Unresolved 明細（最重要的 debug 資訊）
-    log.WriteLine($"--- Unresolved references ({unresolvedRefs.Count}) ---");
-    var unresolvedGrouped = unresolvedRefs
-        .GroupBy(r => r.Target)
-        .OrderByDescending(g => g.Count())
-        .ToList();
-    foreach (var g in unresolvedGrouped)
-    {
-        log.WriteLine($"  [{g.Count()}x] {g.Key}");
-        foreach (var r in g.Take(3))
-            log.WriteLine($"       caller={r.Caller}, file={r.File}:{r.Line}");
-        if (g.Count() > 3)
-            log.WriteLine($"       ... and {g.Count() - 3} more");
-    }
-    log.WriteLine();
-
-    // 6. Third-party DLL references（resolved_to=null 但 ref_type 有值）
-    log.WriteLine($"--- Third-party DLL references (analyzed but not resolved, {resolvedToNull.Count}) ---");
-    var thirdPartyGrouped = resolvedToNull
-        .GroupBy(r => r.RefType)
-        .OrderByDescending(g => g.Count())
-        .ToList();
-    foreach (var g in thirdPartyGrouped)
-    {
-        log.WriteLine($"  {g.Key}: {g.Count()}");
-        foreach (var r in g.Take(3))
-            log.WriteLine($"       {r.Target} (caller={r.Caller})");
-        if (g.Count() > 3)
-            log.WriteLine($"       ... and {g.Count() - 3} more");
-    }
-    log.WriteLine();
-
-    // 7. Missing types 完整清單
-    log.WriteLine($"--- Missing types ({missingTypes.Count}) ---");
-    foreach (var t in missingTypes)
-        log.WriteLine($"  {t}");
-    log.WriteLine();
-
-    // 8. Methods 按 owner 分佈
-    log.WriteLine($"--- Methods ({methods.Count}) by owner ---");
-    var methodsByOwner = methods.GroupBy(m => m.Owner).OrderByDescending(g => g.Count());
-    foreach (var g in methodsByOwner)
-        log.WriteLine($"  {g.Key}: {g.Count()} methods");
-    log.WriteLine();
-
-    // 9. Files 清單
-    log.WriteLine($"--- Files ({files.Count}) ---");
-    foreach (var f in files)
-        log.WriteLine($"  [{f.Role}] {f.Path} — {f.Reason}");
+    Console.Error.WriteLine($"       Diagnostic log: {diagPath}");
 }
-
-Console.Error.WriteLine($"       Diagnostic log: {diagPath}");
 return 0;
 
 static void PrintUsage() => Console.Error.WriteLine(@"
@@ -214,5 +248,6 @@ Options:
   --form <name>      要分析的 Form 名稱（如 frmOrder）
   --output <dir>     JSON + MD 輸出目錄
   --libs <dir>       第三方 DLL 目錄（預設 libs/）
+  --debug            產出 diagnostic.log（逐筆記錄每個 reference 為什麼 resolved 或沒 resolved）
   --help             顯示用法
 ");

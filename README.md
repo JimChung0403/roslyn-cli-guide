@@ -70,8 +70,9 @@ dotnet run --project ~/tools/VbAnalyzer/ -- \
 | `--sln` | 二選一 | .sln 檔案路徑，掃描 solution 內所有 .vbproj |
 | `--project`（`--` 後面的） | 二選一 | 單一 .vbproj 路徑（跟 `--sln` 擇一使用） |
 | `--form` | 是 | 要分析的 Form 名稱（如 `frmOrder`） |
-| `--output` | 是 | JSON 輸出目錄 |
+| `--output` | 是 | JSON + MD 輸出目錄 |
 | `--libs` | 否 | 第三方 DLL 目錄，沒有就不加，缺的 symbol 標 unresolved |
+| `--debug` | 否 | 產出 `diagnostic.log`，逐筆記錄每個 reference 的 resolved 狀態和原因 |
 | `--help` | 否 | 顯示用法 |
 
 `--project`（`--` 前面）指向 VbAnalyzer 工具，`--sln` 指向你的 VB 專案。兩者完全獨立，可以在不同目錄、不同磁碟。
