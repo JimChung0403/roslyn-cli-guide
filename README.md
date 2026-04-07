@@ -88,13 +88,40 @@ output/
 ├── methods.json + methods.md          ← 方法定義、起訖行、參數
 ├── references.json + references.md    ← 呼叫關係、控制項讀寫、跨檔解析
 ├── layout.json + layout.md            ← UI 容器層級、控制項 x/y/w/h 座標（React 重寫用）
-└── stats.json                         ← 統計：解析成功率、缺失型別
+├── stats.json                         ← 統計：解析成功率、缺失型別
+└── diagnostic.log                     ← 詳細診斷紀錄（debug 用）
 ```
 
 ### 驗證
 
-- `stats.json` 的 `resolved_rate` > 80% → 成功
-- `resolved_rate` < 50% → 缺第三方 DLL，加 `--libs ./libs/` 重跑。見 [windows-copy-guide.md](./windows-copy-guide.md)
+看 `stats.json` 的兩個指標：
+
+- `analyzed_rate`：Roslyn 能辨識型別的比例。**主要看這個，> 80% 就算好**
+- `resolved_rate`：能追到原始碼位置 + .NET Framework 的比例。越高越好，但不會到 100%
+
+```bash
+cat output/stats.json | python3 -m json.tool
+```
+
+如果 `analyzed_rate` 偏低，看 `diagnostic.log` 裡的「Unresolved references」段落，找出是缺什麼。
+
+### diagnostic.log 說明
+
+`diagnostic.log` 記錄完整的診斷資訊，用於 debug：
+
+| 段落 | 內容 |
+|------|------|
+| Projects | 每個 project 的 RootNamespace、Imports、檔案數 |
+| Compilation | errors 數量、missing types 數量 |
+| References | analyzed_rate、resolved_rate、ref_type 分佈 |
+| resolved_to breakdown | source / Framework / 第三方 DLL / unresolved 各幾筆 |
+| Unresolved references | 每個解不了的 target 出現幾次、在哪裡被呼叫 |
+| Third-party DLL references | 第三方 DLL 解析到但沒有原始碼的 references |
+| Missing types | 完整的 missing type 清單 |
+| Methods by owner | 追蹤到哪些 class/module 的方法 |
+| Files | 追蹤到哪些相關檔案 |
+
+如果 rate 不理想，把 `diagnostic.log` 和 `stats.json` 帶回來分析
 
 ### 分析多個 Form
 

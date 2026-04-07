@@ -104,9 +104,19 @@ public record AnalysisStats
     public int TotalFiles { get; init; }
     public int TotalMethods { get; init; }
     public int TotalReferences { get; init; }
+
+    // resolved_to != null（target 在原始碼中，有精確的 file:line）
     public int ResolvedReferences { get; init; }
     public int UnresolvedReferences { get; init; }
     public double ResolvedRate { get; init; }
+
+    // ref_type != "unresolved"（Roslyn 成功辨識型別，即使 target 在 DLL 不在原始碼）
+    public int AnalyzedReferences { get; init; }
+    public double AnalyzedRate { get; init; }
+
+    // ref_type 分佈
+    public Dictionary<string, int> RefTypeDistribution { get; init; } = new();
+
     public int CompilationErrors { get; init; }
     public List<string> MissingTypes { get; init; } = [];
 }

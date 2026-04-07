@@ -110,6 +110,20 @@ public static class ReferenceAnalyzer
                     if (targetTypeName != null && !IsExcludedType(target.ContainingType!))
                         discoveredTypes.Add(targetTypeName);
                 }
+                else if (target.ContainingAssembly != null)
+                {
+                    // 不在 source 但 Roslyn 成功解析
+                    // 只有 .NET Framework 原生的才算 resolved（System.*, Microsoft.VisualBasic.*）
+                    // 第三方 DLL 不算
+                    var assemblyName = target.ContainingAssembly.Name ?? "";
+                    var ns = target.ContainingType?.ContainingNamespace?.ToDisplayString() ?? "";
+                    if (ns.StartsWith("System") || ns.StartsWith("Microsoft.VisualBasic")
+                        || assemblyName.StartsWith("System") || assemblyName == "mscorlib"
+                        || assemblyName.StartsWith("Microsoft.VisualBasic"))
+                    {
+                        resolvedTo = $"Framework:{target.ContainingType?.ToDisplayString() ?? assemblyName}";
+                    }
+                }
 
                 var refType = ClassifyMethodCall(target);
                 // binding 偵測：覆寫 ref_type（即使 Roslyn 解析成功，binding 優先）

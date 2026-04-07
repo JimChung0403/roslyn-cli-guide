@@ -2,12 +2,24 @@ using System.Text.RegularExpressions;
 
 namespace VbAnalyzer;
 
+public record ProjectInfo
+{
+    public string VbprojPath { get; init; } = "";
+    public string ProjectDir { get; init; } = "";
+    public string ProjectName { get; init; } = "";
+    public List<string> VbFiles { get; init; } = [];
+}
+
 public static class SolutionLoader
 {
-    public static (List<string> vbFiles, string? vbprojPath) CollectVbFiles(string? slnPath, string? vbprojPath)
+    /// <summary>
+    /// 回傳每個 project 的資訊（vbproj 路徑、.vb 檔案清單），
+    /// 支援多 project 各自有不同的 RootNamespace。
+    /// </summary>
+    public static List<ProjectInfo> CollectProjects(string? slnPath, string? vbprojPath)
     {
-        var projectDirs = new List<string>();
-        string? firstVbproj = null;
+        var projects = new List<ProjectInfo>();
+        var excludeDirs = new[] { "/obj/", "/bin/", "\\obj\\", "\\bin\\" };
 
         if (slnPath != null)
         {
@@ -15,7 +27,7 @@ public static class SolutionLoader
             if (!File.Exists(slnFullPath))
             {
                 Console.Error.WriteLine($"[ERROR] .sln not found: {slnFullPath}");
-                return ([], null);
+                return [];
             }
 
             var slnDir = Path.GetDirectoryName(slnFullPath)!;
@@ -31,9 +43,23 @@ public static class SolutionLoader
 
                     if (File.Exists(projFullPath))
                     {
-                        firstVbproj ??= projFullPath;
-                        projectDirs.Add(Path.GetDirectoryName(projFullPath)!);
-                        Console.Error.WriteLine($"       Project: {projRelPath}");
+                        var projDir = Path.GetDirectoryName(projFullPath)!;
+                        var projName = Path.GetFileNameWithoutExtension(projFullPath);
+
+                        var vbFiles = Directory.GetFiles(projDir, "*.vb", SearchOption.AllDirectories)
+                            .Where(f => !excludeDirs.Any(ex => f.Contains(ex)))
+                            .Select(Path.GetFullPath)
+                            .Distinct().OrderBy(f => f).ToList();
+
+                        Console.Error.WriteLine($"       Project: {projRelPath} ({vbFiles.Count} .vb files)");
+
+                        projects.Add(new ProjectInfo
+                        {
+                            VbprojPath = projFullPath,
+                            ProjectDir = projDir,
+                            ProjectName = projName,
+                            VbFiles = vbFiles
+                        });
                     }
                     else
                     {
@@ -48,32 +74,24 @@ public static class SolutionLoader
             if (!File.Exists(fullPath))
             {
                 Console.Error.WriteLine($"[ERROR] .vbproj not found: {fullPath}");
-                return ([], null);
+                return [];
             }
-            firstVbproj = fullPath;
-            projectDirs.Add(Path.GetDirectoryName(fullPath)!);
-        }
 
-        if (projectDirs.Count == 0)
-        {
-            Console.Error.WriteLine("[WARN] No project directories found");
-            return ([], null);
-        }
+            var projDir = Path.GetDirectoryName(fullPath)!;
+            var vbFiles = Directory.GetFiles(projDir, "*.vb", SearchOption.AllDirectories)
+                .Where(f => !excludeDirs.Any(ex => f.Contains(ex)))
+                .Select(Path.GetFullPath)
+                .Distinct().OrderBy(f => f).ToList();
 
-        var excludeDirs = new[] { "/obj/", "/bin/", "\\obj\\", "\\bin\\" };
-
-        var files = projectDirs
-            .SelectMany(dir =>
+            projects.Add(new ProjectInfo
             {
-                if (!Directory.Exists(dir)) return [];
-                return Directory.GetFiles(dir, "*.vb", SearchOption.AllDirectories);
-            })
-            .Where(f => !excludeDirs.Any(ex => f.Contains(ex)))
-            .Select(Path.GetFullPath)
-            .Distinct()
-            .OrderBy(f => f)
-            .ToList();
+                VbprojPath = fullPath,
+                ProjectDir = projDir,
+                ProjectName = Path.GetFileNameWithoutExtension(fullPath),
+                VbFiles = vbFiles
+            });
+        }
 
-        return (files, firstVbproj);
+        return projects;
     }
 }
