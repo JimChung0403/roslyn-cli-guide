@@ -2,6 +2,7 @@ using System.Text.RegularExpressions;
 using System.Xml.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.VisualBasic;
+using Microsoft.CodeAnalysis.VisualBasic.Syntax;
 
 namespace VbAnalyzer;
 
@@ -91,16 +92,25 @@ public static class CompilationBuilder
 
         var (mainRootNs, mainImports) = ParseVbproj(mainProject.VbprojPath);
 
-        // 合併所有 dependency project 的 RootNamespace 到 global imports
+        // 合併所有 dependency project 的 RootNamespace + 自身 imports 到 global imports
         // 這樣主 project 可以直接用 dependency 的型別短名稱
         foreach (var proj in projects)
         {
             if (proj == mainProject) continue;
-            var (depRootNs, _) = ParseVbproj(proj.VbprojPath);
+            var (depRootNs, depImports) = ParseVbproj(proj.VbprojPath);
             if (!string.IsNullOrEmpty(depRootNs) && !mainImports.Contains(depRootNs))
             {
                 mainImports.Add(depRootNs);
                 Console.Error.WriteLine($"       [INFO] Added '{depRootNs}' to global imports (from {proj.ProjectName})");
+            }
+            // dependency project 自己的 <Import> 條目也要加進來
+            foreach (var imp in depImports)
+            {
+                if (!mainImports.Contains(imp))
+                {
+                    mainImports.Add(imp);
+                    Console.Error.WriteLine($"       [INFO] Added '{imp}' to global imports (from {proj.ProjectName} imports)");
+                }
             }
         }
 
@@ -115,6 +125,47 @@ public static class CompilationBuilder
             allVbFiles.AddRange(proj.VbFiles);
 
         var mainTrees = ParseFiles(allVbFiles);
+
+        // ── 4b. 掃描所有 .vb 檔的 Namespace 宣告，加到 global imports ──
+        // VB.NET 的 Namespace 宣告是相對於 RootNamespace 的：
+        //   RootNamespace="com.tsmc.om" + "Namespace common" → 完整 namespace 是 "com.tsmc.om.common"
+        // 需要把這些子 namespace 加到 global imports，否則 Roslyn 無法用短名稱解析
+        var declaredNamespaces = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var tree in mainTrees)
+        {
+            var root = tree.GetRoot();
+            foreach (var nsBlock in root.DescendantNodes().OfType<NamespaceBlockSyntax>())
+            {
+                var nsName = nsBlock.NamespaceStatement.Name.ToString().Trim();
+                if (!string.IsNullOrEmpty(nsName))
+                    declaredNamespaces.Add(nsName);
+            }
+        }
+
+        if (declaredNamespaces.Count > 0)
+        {
+            Console.Error.WriteLine($"       Found {declaredNamespaces.Count} namespace declarations in source");
+            foreach (var ns in declaredNamespaces.OrderBy(n => n))
+            {
+                // 加上 RootNamespace 前綴（VB Namespace 宣告是相對於 RootNamespace 的）
+                if (!string.IsNullOrEmpty(mainRootNs))
+                {
+                    var qualified = $"{mainRootNs}.{ns}";
+                    if (!mainImports.Contains(qualified))
+                    {
+                        mainImports.Add(qualified);
+                        Console.Error.WriteLine($"       [INFO] Added '{qualified}' to global imports (namespace declaration)");
+                    }
+                }
+
+                // 也加未限定的版本（處理無 RootNamespace 或 namespace 本身就是完整路徑的情況）
+                if (!mainImports.Contains(ns))
+                {
+                    mainImports.Add(ns);
+                    Console.Error.WriteLine($"       [INFO] Added '{ns}' to global imports (namespace declaration)");
+                }
+            }
+        }
 
         var allReferences = new List<MetadataReference>();
         allReferences.AddRange(sharedReferences);

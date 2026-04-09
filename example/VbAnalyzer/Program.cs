@@ -2,7 +2,7 @@ using System.Text.Json;
 using VbAnalyzer;
 using VbAnalyzer.Analyzers;
 
-string? slnPath = null, projectPath = null, formName = null, outputDir = null;
+string? slnPath = null, projectPath = null, formName = null, outputDir = null, projectRootOverride = null;
 string libsDir = "libs/";
 bool debugMode = false;
 
@@ -14,11 +14,12 @@ for (int i = 0; i < args.Length; i++)
         case "--form": formName = args[++i]; break;
         case "--output": outputDir = args[++i]; break;
         case "--libs": libsDir = args[++i]; break;
+        case "--project-root": projectRootOverride = args[++i]; break;
         case "--debug": debugMode = true; break;
         case "--help": PrintUsage(); return 0;
     }
 
-if (formName == null || outputDir == null || (slnPath == null && projectPath == null))
+if (formName == null || outputDir == null || (slnPath == null && projectPath == null) || projectRootOverride == null)
 { PrintUsage(); return 1; }
 
 // ── Step 1: 收集 projects ──
@@ -28,9 +29,7 @@ var totalFiles = projects.Sum(p => p.VbFiles.Count);
 Console.Error.WriteLine($"       {projects.Count} projects, {totalFiles} .vb files total");
 if (totalFiles == 0) { Console.Error.WriteLine("[ERROR] No .vb files found."); return 1; }
 
-var projectRoot = slnPath != null
-    ? Path.GetDirectoryName(Path.GetFullPath(slnPath))!
-    : Path.GetDirectoryName(Path.GetFullPath(projectPath!))!;
+var projectRoot = Path.GetFullPath(projectRootOverride);
 
 // ── Step 2: Multi-project Compilation ──
 Console.Error.WriteLine("[2/5] Building compilation (multi-project)...");
@@ -240,14 +239,15 @@ static void PrintUsage() => Console.Error.WriteLine(@"
 VbAnalyzer — Roslyn-based VB.NET semantic analyzer
 
 Usage:
-  dotnet run --project <VbAnalyzer-dir> -- --sln <path.sln> --form <FormName> --output <dir> [--libs <dir>]
+  dotnet run --project <VbAnalyzer-dir> -- --sln <path.sln> --form <FormName> --output <dir> [--libs <dir>] [--project-root <dir>]
 
 Options:
-  --sln <path>       .sln 檔案路徑（掃描 solution 內所有 .vbproj）
-  --project <path>   單一 .vbproj 路徑（跟 --sln 擇一）
-  --form <name>      要分析的 Form 名稱（如 frmOrder）
-  --output <dir>     JSON + MD 輸出目錄
-  --libs <dir>       第三方 DLL 目錄（預設 libs/）
-  --debug            產出 diagnostic.log（逐筆記錄每個 reference 為什麼 resolved 或沒 resolved）
-  --help             顯示用法
+  --sln <path>          .sln 檔案路徑（掃描 solution 內所有 .vbproj）
+  --project <path>      單一 .vbproj 路徑（跟 --sln 擇一）
+  --form <name>         要分析的 Form 名稱（如 frmOrder）
+  --output <dir>        JSON + MD 輸出目錄
+  --libs <dir>          第三方 DLL 目錄（預設 libs/）
+  --project-root <dir>  相對路徑基準點（必填，與 Python 的 --project-root 對齊）
+  --debug               產出 diagnostic.log（逐筆記錄每個 reference 為什麼 resolved 或沒 resolved）
+  --help                顯示用法
 ");
