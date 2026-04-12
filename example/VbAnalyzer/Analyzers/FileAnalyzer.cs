@@ -26,9 +26,15 @@ public static class FileAnalyzer
         {
             var relPath = RelPath(filePath, projectRoot);
             var isDesigner = filePath.EndsWith(".Designer.vb", StringComparison.OrdinalIgnoreCase);
-            var isMain = string.Equals(System.IO.Path.GetFileNameWithoutExtension(filePath), formName, StringComparison.OrdinalIgnoreCase);
+            // form-main：非 Designer 的第一個檔案（可能檔名跟 class name 不同）
+            var isMain = !isDesigner && formFiles.Count(f => !f.EndsWith(".Designer.vb", StringComparison.OrdinalIgnoreCase)) <= 1;
+            if (!isMain && !isDesigner)
+            {
+                // 多個非 Designer 檔案時，用檔名或 class 定義位置判斷
+                var fileName = System.IO.Path.GetFileNameWithoutExtension(filePath);
+                isMain = string.Equals(fileName, formName, StringComparison.OrdinalIgnoreCase);
+            }
 
-            // 對齊 Python 的 role 名稱
             var role = isDesigner ? "form-designer" : isMain ? "form-main" : "partial";
             var reason = isDesigner ? "Form Designer 檔案" : isMain ? "Form 主檔案" : "Partial class 檔案";
 
@@ -110,18 +116,38 @@ public static class FileAnalyzer
                     if (s != null && referencedTypes.Contains(s.Name)) symbolNames.Add(s.Name);
                 }
 
-                results.Add(new FileEntry
+                // 區分 resolved-dependency vs related-helper
+                // 如果 referencedTypes 裡包含這個 symbol 的名稱（表示有方法呼叫 resolve 到它）→ resolved-dependency
+                var hasMethods = false;
+                foreach (var sn in symbolNames)
                 {
-                    Path = relPath,
-                    Role = "related-helper",
-                    Reason = $"檔名含相關 symbol `{string.Join("`, `", symbolNames)}`"
-                });
+                    // 檢查這個 type 是否有被任何 invocation resolve 到
+                    foreach (var anyTree in compilation.SyntaxTrees)
+                    {
+                        var anyModel = compilation.GetSemanticModel(anyTree);
+                        foreach (var inv in anyTree.GetRoot().DescendantNodes().OfType<InvocationExpressionSyntax>())
+                        {
+                            if (anyModel.GetSymbolInfo(inv).Symbol is IMethodSymbol ms
+                                && string.Equals(ms.ContainingType?.Name, sn, StringComparison.OrdinalIgnoreCase))
+                            { hasMethods = true; break; }
+                        }
+                        if (hasMethods) break;
+                    }
+                    if (hasMethods) break;
+                }
+
+                var fileRole = hasMethods ? "resolved-dependency" : "related-helper";
+                var fileReason = hasMethods
+                    ? $"被呼叫的方法定義在此 (`{string.Join("`, `", symbolNames)}`)"
+                    : $"相關 symbol `{string.Join("`, `", symbolNames)}`";
+
+                results.Add(new FileEntry { Path = relPath, Role = fileRole, Reason = fileReason });
             }
         }
 
         // 排序對齊 Python：form-main → form-designer → partial → related-helper
         return results
-            .OrderBy(f => f.Role switch { "form-main" => 0, "form-designer" => 1, "partial" => 2, "related-helper" => 3, _ => 4 })
+            .OrderBy(f => f.Role switch { "form-main" => 0, "form-designer" => 1, "partial" => 2, "resolved-dependency" => 3, "related-helper" => 4, _ => 5 })
             .ThenBy(f => f.Path)
             .ToList();
     }

@@ -9,14 +9,44 @@ public static class ReferenceAnalyzer
     const int MaxExpandRounds = 5;
 
     /// <summary>
+    /// 已知的 control-state 屬性：讀取時應標記為 control-read（即使在鏈式存取中）。
+    /// 對齊 Python CONTROL_READ_RE 的屬性清單。
+    /// </summary>
+    static readonly HashSet<string> ControlStateReadProperties = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Text", "Value", "Checked", "SelectedIndex", "SelectedValue",
+        "CurrentRow", "CurrentCell", "SelectedRows", "SelectedCells",
+        "SelectedItem", "SelectedItems", "EditValue", "Items", "Rows"
+    };
+
+    /// <summary>
+    /// 已知的 control-state 屬性：寫入時應標記為 control-write。
+    /// 對齊 Python CONTROL_WRITE_RE 的屬性清單。
+    /// </summary>
+    static readonly HashSet<string> ControlStateWriteProperties = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Enabled", "Visible", "ReadOnly", "Text", "Checked",
+        "SelectedIndex", "SelectedValue", "BackColor", "ForeColor",
+        "EditValue"
+    };
+
+    /// <summary>
     /// Iterative expansion：先掃 Form class 自身，再跟著 resolved_to 追進 helper class，
     /// 最多 MaxExpandRounds 輪，遇到 Framework/.NET 內建型別或不在 source 中的 symbol 就停止。
     /// 邏輯與 Python build_vb_form_index.py 的 collect_references + iterative expansion 對齊。
     /// </summary>
-    public static (List<ReferenceEntry> refs, HashSet<string> discoveredTypes) Analyze(VisualBasicCompilation compilation, string formName, string projectRoot)
+    public static (List<ReferenceEntry> refs, HashSet<string> discoveredTypes) Analyze(
+        VisualBasicCompilation compilation, string formName, string projectRoot,
+        HashSet<string>? controlNames = null)
     {
         var results = new List<ReferenceEntry>();
         var scannedTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // 預建 syntax-level fallback 查找表：當 GetSymbolInfo() 因 compilation errors 回傳 null 時，
+        // 用純語法層的方法名/屬性名 → 原始碼位置映射來做 fallback 解析
+        var fallbackTable = BuildFallbackTable(compilation, projectRoot);
+        Console.Error.WriteLine($"       Fallback table: {fallbackTable.Count} method/property names indexed");
+        var knownControls = controlNames ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         // 第一輪：掃 Form class 自身
         var typesToScan = new List<string> { formName };
@@ -44,7 +74,7 @@ public static class ReferenceAnalyzer
                         continue;
 
                     var ownerName = classSymbol.Name;
-                    ScanBlock(classBlock, model, tree, relFile, ownerName, projectRoot, newRefs, discoveredTypes);
+                    ScanBlock(classBlock, model, tree, relFile, ownerName, projectRoot, newRefs, discoveredTypes, fallbackTable, knownControls);
                 }
 
                 // 掃 module
@@ -56,8 +86,7 @@ public static class ReferenceAnalyzer
                         continue;
 
                     var ownerName = moduleSymbol.Name;
-                    // Module 沒有 ClassBlockSyntax，但內部結構一樣有 MethodBlock、MemberAccess
-                    ScanBlock(moduleBlock, model, tree, relFile, ownerName, projectRoot, newRefs, discoveredTypes);
+                    ScanBlock(moduleBlock, model, tree, relFile, ownerName, projectRoot, newRefs, discoveredTypes, fallbackTable, knownControls);
                 }
             }
 
@@ -83,7 +112,9 @@ public static class ReferenceAnalyzer
     /// </summary>
     static void ScanBlock(SyntaxNode block, SemanticModel model, SyntaxTree tree,
         string relFile, string ownerName, string projectRoot,
-        List<ReferenceEntry> results, HashSet<string> discoveredTypes)
+        List<ReferenceEntry> results, HashSet<string> discoveredTypes,
+        Dictionary<string, List<FallbackEntry>> fallbackTable,
+        HashSet<string> knownControls)
     {
         // Invocations
         foreach (var invocation in block.DescendantNodes().OfType<InvocationExpressionSyntax>())
@@ -103,7 +134,9 @@ public static class ReferenceAnalyzer
                 if (targetLoc != null && targetLoc.IsInSource)
                 {
                     var span = targetLoc.GetLineSpan();
-                    resolvedTo = $"{RelPath(span.Path, projectRoot)}:{span.StartLinePosition.Line + 1}";
+                    var symbolName = $"{target.ContainingType?.Name ?? "?"}.{target.Name}";
+                    var fileLoc = $"{RelPath(span.Path, projectRoot)}:{span.StartLinePosition.Line + 1}";
+                    resolvedTo = $"{symbolName} ({fileLoc})";
 
                     // 發現新的、在 source 中的型別 → 加入待展開清單
                     var targetTypeName = target.ContainingType?.Name;
@@ -112,9 +145,6 @@ public static class ReferenceAnalyzer
                 }
                 else if (target.ContainingAssembly != null)
                 {
-                    // 不在 source 但 Roslyn 成功解析
-                    // 只有 .NET Framework 原生的才算 resolved（System.*, Microsoft.VisualBasic.*）
-                    // 第三方 DLL 不算
                     var assemblyName = target.ContainingAssembly.Name ?? "";
                     var ns = target.ContainingType?.ContainingNamespace?.ToDisplayString() ?? "";
                     if (ns.StartsWith("System") || ns.StartsWith("Microsoft.VisualBasic")
@@ -123,17 +153,26 @@ public static class ReferenceAnalyzer
                     {
                         resolvedTo = $"Framework:{target.ContainingType?.ToDisplayString() ?? assemblyName}";
                     }
+                    else
+                    {
+                        // 第三方 DLL：Roslyn 認得型別，追蹤到此為終點
+                        resolvedTo = $"DLL:{target.ContainingType?.ToDisplayString() ?? assemblyName}";
+                    }
                 }
 
                 var refType = ClassifyMethodCall(target);
-                // binding 偵測：覆寫 ref_type（即使 Roslyn 解析成功，binding 優先）
                 if (IsBindingCall(invocation.Expression.ToString()))
                     refType = "binding";
+
+                // Target 用 FormatTarget 保留原始碼中的實例名（如 conexao.Close）
+                // 類型資訊已在 ResolvedTo 中保存（如 Framework:System.Data.SqlClient.SqlConnection）
+                // 這讓 shared-state-summary 能區分同類型的不同控件/變數
+                var syntaxTarget = FormatTarget(invocation.Expression);
 
                 results.Add(new ReferenceEntry
                 {
                     Caller = callerMethod,
-                    Target = $"{target.ContainingType?.Name ?? "?"}.{target.Name}",
+                    Target = syntaxTarget,
                     File = relFile, Line = line,
                     RefType = refType,
                     Context = context, ResolvedTo = resolvedTo
@@ -141,40 +180,101 @@ public static class ReferenceAnalyzer
             }
             else
             {
-                // unresolved 也做 binding 文字比對（缺 DLL 時 DataBindings.Add 會是 unresolved）
+                // Roslyn semantic model 失敗 → 嘗試 syntax-level fallback
                 var refType = IsBindingCall(invocation.Expression.ToString()) ? "binding" : "unresolved";
+                string? fallbackResolvedTo = null;
+                var targetText = FormatTarget(invocation.Expression);
+
+                var methodName = ExtractSimpleName(invocation.Expression);
+                if (methodName != null && fallbackTable.TryGetValue(methodName, out var candidates))
+                {
+                    // 優先同 class 的 match
+                    var match = candidates.FirstOrDefault(c =>
+                        string.Equals(c.OwnerType, ownerName, StringComparison.OrdinalIgnoreCase));
+                    if (match == null && candidates.Count > 0)
+                        match = candidates[0];
+
+                    if (match != null)
+                    {
+                        fallbackResolvedTo = match.ResolvedTo;
+                        targetText = $"{match.OwnerType}.{methodName}";
+                        if (refType == "unresolved") refType = "method-call";
+                        // 不從 fallback 觸發 type expansion — expansion 只靠 semantic model 驅動
+                        // 避免因 syntax-level 名稱碰撞導致 expansion 爆炸
+                    }
+                }
 
                 results.Add(new ReferenceEntry
                 {
                     Caller = callerMethod,
-                    Target = invocation.Expression.ToString(),
+                    Target = targetText,
                     File = relFile, Line = line,
                     RefType = refType,
-                    Context = context, ResolvedTo = null
+                    Context = context, ResolvedTo = fallbackResolvedTo
                 });
             }
         }
 
-        // MemberAccess（控制項讀寫 + binding assignment）
+        // MemberAccess（控制項讀寫 + binding assignment + dialog-navigation without parens + fallback for unresolved）
         foreach (var memberAccess in block.DescendantNodes().OfType<MemberAccessExpressionSyntax>())
         {
             if (memberAccess.Parent is InvocationExpressionSyntax) continue;
 
-            var maText = memberAccess.ToString();
+            // VB.NET 允許省略括號呼叫方法（如 findCustomerForm.ShowDialog 等同 .ShowDialog()）
+            // 這些在 AST 中是 MemberAccessExpression 而非 InvocationExpression
+            // 先偵測 Show/ShowDialog 無括號呼叫，歸類為 dialog-navigation
+            var maName = memberAccess.Name.Identifier.Text;
+            if (maName is "Show" or "ShowDialog")
+            {
+                var navSymbolInfo = model.GetSymbolInfo(memberAccess);
+                if (navSymbolInfo.Symbol is IMethodSymbol methodSym && InheritsFrom(methodSym.ContainingType, "Form"))
+                {
+                    var callerM = $"{ownerName}.{GetContainingMethodName(memberAccess)}";
+                    var ctx = memberAccess.Parent?.ToString() ?? memberAccess.ToString();
+                    if (ctx.Length > 120) ctx = ctx[..120] + "...";
+                    var syntaxTarget = FormatTarget(memberAccess);
+                    string? resolvedTo = null;
+                    var targetLoc = methodSym.Locations.FirstOrDefault();
+                    if (targetLoc != null && !targetLoc.IsInSource)
+                    {
+                        var ns = methodSym.ContainingType?.ContainingNamespace?.ToDisplayString() ?? "";
+                        resolvedTo = ns.StartsWith("System") ? $"Framework:{methodSym.ContainingType?.ToDisplayString()}" : $"DLL:{methodSym.ContainingType?.ToDisplayString()}";
+                    }
+                    results.Add(new ReferenceEntry
+                    {
+                        Caller = callerM, Target = syntaxTarget,
+                        File = relFile, Line = memberAccess.GetLocation().GetLineSpan().StartLinePosition.Line + 1,
+                        RefType = "dialog-navigation", Context = ctx, ResolvedTo = resolvedTo
+                    });
+                    continue;
+                }
+            }
+
+            // 跳過中間層 MemberAccess，只捕獲最外層的屬性存取
+            // Me.txtName.Text → 內層 "Me.txtName" 跳過，外層 "Me.txtName.Text" 捕獲
+            // 但例外：如果當前節點存取的是已知 control-state 屬性（Text, Checked, Enabled 等），
+            // 即使 parent 也是 MemberAccess（如 txtName.Text.Trim()），仍然捕獲
+            if (memberAccess.Parent is MemberAccessExpressionSyntax)
+            {
+                var propName = memberAccess.Name.Identifier.Text;
+                if (!ControlStateReadProperties.Contains(propName) && !ControlStateWriteProperties.Contains(propName))
+                    continue;
+            }
+
+            var maTarget = FormatTarget(memberAccess);
             var callerMethod = $"{ownerName}.{GetContainingMethodName(memberAccess)}";
             var maLine = memberAccess.GetLocation().GetLineSpan().StartLinePosition.Line + 1;
 
             // binding assignment 偵測（如 grdListagem.DataSource = dt）
-            // 用文字比對，不依賴型別解析（缺 DLL 也能抓到）
             if (memberAccess.Parent is AssignmentStatementSyntax assignment
                 && assignment.Left == memberAccess
-                && maText.Contains(".DataSource", StringComparison.OrdinalIgnoreCase))
+                && maTarget.Contains(".DataSource", StringComparison.OrdinalIgnoreCase))
             {
                 var context = assignment.ToString();
                 if (context.Length > 120) context = context[..120] + "...";
                 results.Add(new ReferenceEntry
                 {
-                    Caller = callerMethod, Target = maText,
+                    Caller = callerMethod, Target = maTarget,
                     File = relFile, Line = maLine,
                     RefType = "binding", Context = context, ResolvedTo = null
                 });
@@ -183,20 +283,92 @@ public static class ReferenceAnalyzer
 
             // 控制項讀寫（需要型別解析）
             var symbolInfo = model.GetSymbolInfo(memberAccess);
-            if (symbolInfo.Symbol is not IPropertySymbol prop) continue;
-            if (prop.ContainingType == null || !IsControlType(prop.ContainingType)) continue;
-
-            var isWrite = memberAccess.Parent is AssignmentStatementSyntax a2 && a2.Left == memberAccess;
-            var ctx = memberAccess.Parent?.ToString() ?? maText;
-            if (ctx.Length > 120) ctx = ctx[..120] + "...";
-
-            results.Add(new ReferenceEntry
+            if (symbolInfo.Symbol is IPropertySymbol prop)
             {
-                Caller = callerMethod, Target = maText,
-                File = relFile, Line = maLine,
-                RefType = isWrite ? "control-write" : "control-read",
-                Context = ctx, ResolvedTo = null
-            });
+                if (prop.ContainingType == null || !IsControlType(prop.ContainingType)) continue;
+                // 只捕獲 controlName.Property 格式（有 . 分隔）
+                // 跳過純控制項欄位存取（如 txtName → 沒有屬性名）
+                if (!maTarget.Contains('.')) continue;
+                // 過濾純 layout/visual 屬性（已在 layout.json，不是動態行為）
+                if (LayoutOnlyProperties.Contains(prop.Name)) continue;
+
+                var isWrite = memberAccess.Parent is AssignmentStatementSyntax a2 && a2.Left == memberAccess;
+                var ctx = memberAccess.Parent?.ToString() ?? memberAccess.ToString();
+                if (ctx.Length > 120) ctx = ctx[..120] + "...";
+
+                // 控制項屬性追蹤到此為終點（定義在 DLL 裡）
+                string? maResolvedTo = null;
+                var propAsm = prop.ContainingAssembly?.Name ?? "";
+                var propNs = prop.ContainingType.ContainingNamespace?.ToDisplayString() ?? "";
+                if (propNs.StartsWith("System") || propNs.StartsWith("Microsoft.VisualBasic")
+                    || propAsm.StartsWith("System") || propAsm == "mscorlib")
+                    maResolvedTo = $"Framework:{prop.ContainingType.ToDisplayString()}";
+                else
+                    maResolvedTo = $"DLL:{prop.ContainingType.ToDisplayString()}";
+
+                results.Add(new ReferenceEntry
+                {
+                    Caller = callerMethod, Target = maTarget,
+                    File = relFile, Line = maLine,
+                    RefType = isWrite ? "control-write" : "control-read",
+                    Context = ctx, ResolvedTo = maResolvedTo
+                });
+            }
+            else if (symbolInfo.Symbol == null)
+            {
+                // Fallback：symbol 為 null（compilation errors 導致）
+                var memberName = memberAccess.Name.Identifier.Text;
+                var receiverName = ExtractSimpleName(memberAccess.Expression);
+                var handled = false;
+
+                // Fallback A: 用已知 control 名稱 + control-state 屬性名偵測 control-read/write
+                if (receiverName != null && knownControls.Contains(receiverName)
+                    && (ControlStateReadProperties.Contains(memberName) || ControlStateWriteProperties.Contains(memberName)))
+                {
+                    var isWrite = memberAccess.Parent is AssignmentStatementSyntax a4 && a4.Left == memberAccess;
+                    if ((isWrite && ControlStateWriteProperties.Contains(memberName)) ||
+                        (!isWrite && ControlStateReadProperties.Contains(memberName)))
+                    {
+                        var ctx = memberAccess.Parent?.ToString() ?? memberAccess.ToString();
+                        if (ctx.Length > 120) ctx = ctx[..120] + "...";
+                        results.Add(new ReferenceEntry
+                        {
+                            Caller = callerMethod, Target = maTarget,
+                            File = relFile, Line = maLine,
+                            RefType = isWrite ? "control-write" : "control-read",
+                            Context = ctx, ResolvedTo = null
+                        });
+                        handled = true;
+                    }
+                }
+
+                // Fallback B: 用 fallback table 解其他 unresolved member access
+                if (!handled && fallbackTable.TryGetValue(memberName, out var propCandidates))
+                {
+                    var match = propCandidates.FirstOrDefault(c =>
+                        string.Equals(c.OwnerType, ownerName, StringComparison.OrdinalIgnoreCase));
+                    if (match == null && receiverName != null)
+                        match = propCandidates.FirstOrDefault(c =>
+                            string.Equals(c.OwnerType, receiverName, StringComparison.OrdinalIgnoreCase));
+                    if (match == null && propCandidates.Count == 1)
+                        match = propCandidates[0];
+
+                    if (match != null)
+                    {
+                        var ctx = memberAccess.Parent?.ToString() ?? memberAccess.ToString();
+                        if (ctx.Length > 120) ctx = ctx[..120] + "...";
+                        var isWrite = memberAccess.Parent is AssignmentStatementSyntax a3 && a3.Left == memberAccess;
+                        results.Add(new ReferenceEntry
+                        {
+                            Caller = callerMethod, Target = maTarget,
+                            File = relFile, Line = maLine,
+                            RefType = isWrite ? "control-write" : "control-read",
+                            Context = ctx, ResolvedTo = match.ResolvedTo
+                        });
+                    }
+                }
+                // fallback 都找不到 → drop（避免噪音）
+            }
         }
     }
 
@@ -245,13 +417,71 @@ public static class ReferenceAnalyzer
         return false;
     }
 
+    /// <summary>
+    /// 純 layout / visual 屬性 — 只在 Designer InitializeComponent 裡設定，不是動態行為。
+    /// layout 資訊已在 layout.json，不需要重複出現在 references 裡。
+    /// </summary>
+    /// <summary>
+    /// 純 layout / visual 屬性 — 只在 Designer InitializeComponent 裡設定，不是動態行為。
+    /// layout 資訊已在 layout.json，不需要重複出現在 references 裡。
+    /// 注意：BackColor, ForeColor 已移除，因為 event handler 中動態設定這些屬性是 UI state 變更
+    ///（例如驗證失敗時按鈕變紅），對 React 轉換有意義。
+    /// </summary>
+    static readonly HashSet<string> LayoutOnlyProperties = new(StringComparer.OrdinalIgnoreCase)
+    {
+        // Position and sizing（已在 layout.json）
+        "Location", "Size", "ClientSize", "MinimumSize", "MaximumSize",
+        "AutoSize", "AutoSizeMode", "AutoScaleDimensions", "AutoScaleMode",
+        "Anchor", "Dock", "Margin", "Padding",
+        // Identity
+        "Name",
+        // Visual appearance (static-only, not dynamic state)
+        "UseVisualStyleBackColor", "Font",
+        "BackgroundImage", "BackgroundImageLayout", "Cursor", "RightToLeft",
+        "FlatStyle", "Image", "ImageAlign", "TextAlign", "TextImageRelation",
+        // Layout metadata
+        "ColumnHeadersHeightSizeMode", "RowHeadersWidth", "RowHeadersVisible",
+        "ScrollBars", "BorderStyle",
+        // Form designer
+        "FormBorderStyle", "StartPosition", "WindowState",
+        "Icon", "MaximizeBox", "MinimizeBox", "ShowIcon", "ShowInTaskbar",
+        "SizeGripStyle", "ImeMode", "KeyPreview",
+    };
+
+    /// <summary>
+    /// UI component 基底類型名稱 — 這些類型的子類擁有 .Visible, .Enabled 等 UI 屬性，
+    /// 即使不繼承 System.Windows.Forms.Control（例如 DevExpress GridColumn, BarItem,
+    /// ToolStripItem, DataGridViewColumn 等）。
+    /// </summary>
+    static readonly HashSet<string> UiComponentBaseNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        // WinForms
+        "Control", "AxHost", "ToolStripItem", "DataGridViewColumn", "DataGridViewCell",
+        // DevExpress common bases
+        "GridColumn", "BarItem", "RepositoryItem",
+        // ComponentModel (broadest — catches anything registered as a component)
+        "Component",
+    };
+
     static bool IsControlType(INamedTypeSymbol type)
     {
         var current = type;
         while (current != null)
         {
-            if (current.Name == "Control" && current.ContainingNamespace?.ToDisplayString() == "System.Windows.Forms") return true;
-            if (current.Name == "AxHost") return true;
+            if (UiComponentBaseNames.Contains(current.Name))
+            {
+                // For "Component" base, require it to be System.ComponentModel.Component
+                // to avoid false positives on unrelated classes named Component
+                if (current.Name == "Component")
+                {
+                    var ns = current.ContainingNamespace?.ToDisplayString() ?? "";
+                    if (ns == "System.ComponentModel") return true;
+                }
+                else
+                {
+                    return true;
+                }
+            }
             current = current.BaseType;
         }
         return false;
@@ -262,6 +492,105 @@ public static class ReferenceAnalyzer
         var c = type;
         while (c != null) { if (c.Name == baseName) return true; c = c.BaseType; }
         return false;
+    }
+
+    // Fallback entry：syntax-level 的方法/屬性定義位置
+    record FallbackEntry(string OwnerType, string ResolvedTo);
+
+    /// <summary>
+    /// 預掃所有 syntax tree，建立 method/property name → source location 的映射表。
+    /// 當 Roslyn semantic model 因 compilation errors 無法解析時，用這張表做 fallback。
+    /// </summary>
+    static Dictionary<string, List<FallbackEntry>> BuildFallbackTable(
+        VisualBasicCompilation compilation, string projectRoot)
+    {
+        var table = new Dictionary<string, List<FallbackEntry>>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var tree in compilation.SyntaxTrees)
+        {
+            var root = tree.GetRoot();
+            var file = RelPath(tree.FilePath, projectRoot);
+
+            foreach (var typeBlock in root.DescendantNodes()
+                .Where(n => n is ClassBlockSyntax or ModuleBlockSyntax))
+            {
+                var typeName = typeBlock switch
+                {
+                    ClassBlockSyntax cb => cb.ClassStatement.Identifier.Text,
+                    ModuleBlockSyntax mb => mb.ModuleStatement.Identifier.Text,
+                    _ => "?"
+                };
+
+                // Methods (Sub / Function)
+                foreach (var method in typeBlock.DescendantNodes().OfType<MethodBlockSyntax>())
+                {
+                    var name = method.SubOrFunctionStatement.Identifier.Text;
+                    var loc = method.SubOrFunctionStatement.GetLocation().GetLineSpan();
+                    var entry = new FallbackEntry(typeName, $"{typeName}.{name} ({file}:{loc.StartLinePosition.Line + 1})");
+                    if (!table.ContainsKey(name)) table[name] = new();
+                    table[name].Add(entry);
+                }
+
+                // Properties
+                foreach (var prop in typeBlock.DescendantNodes().OfType<PropertyBlockSyntax>())
+                {
+                    var name = prop.PropertyStatement.Identifier.Text;
+                    var loc = prop.PropertyStatement.GetLocation().GetLineSpan();
+                    var entry = new FallbackEntry(typeName, $"{typeName}.{name} ({file}:{loc.StartLinePosition.Line + 1})");
+                    if (!table.ContainsKey(name)) table[name] = new();
+                    table[name].Add(entry);
+                }
+            }
+        }
+
+        return table;
+    }
+
+    /// <summary>
+    /// 從 expression 中取出最末端的簡單名稱。
+    /// isUpgradeByWO → "isUpgradeByWO"
+    /// Me.Get_Grade_Main_Info → "Get_Grade_Main_Info"
+    /// obj.Method → "Method"
+    /// </summary>
+    static string? ExtractSimpleName(ExpressionSyntax expression)
+    {
+        return expression switch
+        {
+            IdentifierNameSyntax id => id.Identifier.Text,
+            MemberAccessExpressionSyntax ma => ma.Name.Identifier.Text,
+            _ => null
+        };
+    }
+
+    /// <summary>
+    /// 從 syntax tree 遞迴建構 target 名稱，自動去掉 VB.NET 的自我引用前綴。
+    /// Me.txtName.Text → txtName.Text
+    /// MyBase.OnLoad → OnLoad
+    /// MyClass.Method → Method
+    /// SomeModule.Method → SomeModule.Method（保留非自我引用的 receiver）
+    /// </summary>
+    static string FormatTarget(ExpressionSyntax? expr)
+    {
+        if (expr == null) return "?";
+        return expr switch
+        {
+            MemberAccessExpressionSyntax ma when IsSelfReference(ma.Expression)
+                => ma.Name.Identifier.Text,
+            MemberAccessExpressionSyntax ma
+                => $"{FormatTarget(ma.Expression)}.{ma.Name.Identifier.Text}",
+            InvocationExpressionSyntax inv
+                => FormatTarget(inv.Expression),
+            IdentifierNameSyntax id => id.Identifier.Text,
+            _ => expr.ToString()
+        };
+    }
+
+    static bool IsSelfReference(ExpressionSyntax expr)
+    {
+        // VB.NET 的 Me / MyBase / MyClass 是專用 syntax node，不是 IdentifierNameSyntax
+        return expr is MeExpressionSyntax
+            or MyBaseExpressionSyntax
+            or MyClassExpressionSyntax;
     }
 
     static string GetContainingMethodName(SyntaxNode node)

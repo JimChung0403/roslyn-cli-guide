@@ -37,9 +37,11 @@ var (compilation, compilationErrors, missingTypes) = CompilationBuilder.Build(pr
 
 // ── Step 3: 分析 ──
 Console.Error.WriteLine($"[3/5] Analyzing form '{formName}'...");
-var (references, discoveredTypes) = ReferenceAnalyzer.Analyze(compilation, formName, projectRoot);
-var methods = MethodAnalyzer.Analyze(compilation, formName, projectRoot, discoveredTypes);
+// ControlAnalyzer 先跑，取得 control 名稱清單供 ReferenceAnalyzer 做 fallback 偵測
 var controls = ControlAnalyzer.Analyze(compilation, formName, projectRoot);
+var controlNames = new HashSet<string>(controls.Select(c => c.Name), StringComparer.OrdinalIgnoreCase);
+var (references, discoveredTypes) = ReferenceAnalyzer.Analyze(compilation, formName, projectRoot, controlNames);
+var methods = MethodAnalyzer.Analyze(compilation, formName, projectRoot, discoveredTypes);
 var events = EventAnalyzer.Analyze(compilation, formName, projectRoot);
 var files = FileAnalyzer.Analyze(compilation, formName, projectRoot);
 var layout = LayoutAnalyzer.Build(controls, formName);
@@ -54,7 +56,7 @@ var jsonOpt = new JsonSerializerOptions
 {
     WriteIndented = true,
     PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
-    DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
+    DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.Never
 };
 
 OutputWriter.WriteWrapped(Path.Combine(outputDir, "files.json"), files,

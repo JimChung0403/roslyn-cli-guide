@@ -29,15 +29,18 @@ public static class MethodAnalyzer
                 if (!relevantTypes.Contains(ownerName)) continue;
 
                 var lineSpan = methodBlock.GetLocation().GetLineSpan();
-                var returnType = symbol.ReturnsVoid ? "Sub" : "Function";
-                var paramStr = string.Join(", ", symbol.Parameters.Select(p => $"{p.Name} As {p.Type?.ToDisplayString() ?? "Object"}"));
+                // 直接從 syntax tree 讀原始宣告行，保留原始碼的型別短名/修飾詞，跟 Python 對齊
+                // 去掉 attribute（<...> _）前綴，只保留 Sub/Function 宣告本身
+                var sigRaw = methodBlock.SubOrFunctionStatement.ToString();
+                var sigLines = sigRaw.Split('\n').Select(l => l.Trim()).Where(l => !l.StartsWith("<") && l.Length > 0);
+                var sig = string.Join(" ", sigLines).Trim();
 
                 results.Add(new MethodEntry
                 {
                     Name = symbol.Name, Owner = ownerName, File = relFile,
                     StartLine = lineSpan.StartLinePosition.Line + 1,
                     EndLine = lineSpan.EndLinePosition.Line + 1,
-                    Signature = $"{returnType} {symbol.Name}({paramStr})",
+                    Signature = sig,
                 });
             }
 
@@ -49,14 +52,14 @@ public static class MethodAnalyzer
                 if (!relevantTypes.Contains(ownerName)) continue;
 
                 var lineSpan = propBlock.GetLocation().GetLineSpan();
-                var paramStr = string.Join(", ", symbol.Parameters.Select(p => $"{p.Name} As {p.Type?.ToDisplayString() ?? "Object"}"));
+                var propSig = propBlock.PropertyStatement.ToString().Trim();
 
                 results.Add(new MethodEntry
                 {
                     Name = symbol.Name, Owner = ownerName, File = relFile,
                     StartLine = lineSpan.StartLinePosition.Line + 1,
                     EndLine = lineSpan.EndLinePosition.Line + 1,
-                    Signature = $"Property {symbol.Name}({paramStr}) As {symbol.Type?.ToDisplayString() ?? "Object"}",
+                    Signature = propSig,
                 });
             }
         }
@@ -133,6 +136,40 @@ public static class MethodAnalyzer
             return true;
 
         return false;
+    }
+
+    /// <summary>
+    /// 產生跟 Python 一致的 VB.NET method signature。
+    /// 包含 Public/Private/Friend + Sub/Function + ByVal/ByRef + 回傳型別。
+    /// </summary>
+    static string FormatMethodSignature(IMethodSymbol symbol)
+    {
+        var access = FormatAccessibility(symbol.DeclaredAccessibility);
+        var overrides = symbol.IsOverride ? "Overrides " : "";
+        var kind = symbol.ReturnsVoid ? "Sub" : "Function";
+
+        var paramParts = symbol.Parameters.Select(p =>
+        {
+            var refKind = p.RefKind == RefKind.Ref ? "ByRef " : "ByVal ";
+            return $"{refKind}{p.Name} As {p.Type?.ToDisplayString() ?? "Object"}";
+        });
+        var paramStr = string.Join(", ", paramParts);
+
+        var returnPart = symbol.ReturnsVoid ? "" : $" As {symbol.ReturnType?.ToDisplayString() ?? "Object"}";
+        return $"{access}{overrides}{kind} {symbol.Name}({paramStr}){returnPart}";
+    }
+
+    static string FormatAccessibility(Accessibility accessibility)
+    {
+        return accessibility switch
+        {
+            Accessibility.Public => "Public ",
+            Accessibility.Private => "Private ",
+            Accessibility.Protected => "Protected ",
+            Accessibility.Friend => "Friend ",
+            Accessibility.ProtectedOrFriend => "Protected Friend ",
+            _ => ""
+        };
     }
 
     static string RelPath(string fullPath, string root)
